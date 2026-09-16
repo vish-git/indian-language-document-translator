@@ -1,0 +1,543 @@
+```css
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    Arial,
+    Helvetica,
+    sans-serif;
+  background: #f5f7fb;
+  color: #1f2937;
+}
+
+button,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* -----------------------------
+   App
+------------------------------ */
+
+.app {
+  min-height: 100vh;
+}
+
+.app-header {
+  background: #1f2937;
+  color: white;
+  padding: 24px 20px;
+}
+
+.app-header h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+}
+
+.app-header p {
+  margin: 0;
+  color: #d1d5db;
+}
+
+/* -----------------------------
+   Container
+------------------------------ */
+
+.container {
+  width: min(1100px, 94%);
+  margin: 24px auto 50px;
+}
+
+/* -----------------------------
+   Card
+------------------------------ */
+
+.card {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.card h2 {
+  margin: 0 0 18px;
+  font-size: 20px;
+}
+
+.card h3 {
+  margin: 0 0 10px;
+}
+
+/* -----------------------------
+   Language Controls
+------------------------------ */
+
+.language-controls {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr)
+    auto
+    minmax(0, 1fr);
+
+  align-items: end;
+  gap: 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.field label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.field select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: white;
+}
+
+.swap-button {
+  width: 44px;
+  height: 42px;
+
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+
+  background: white;
+
+  font-size: 22px;
+}
+
+.swap-button:hover {
+  background: #f3f4f6;
+}
+
+/* -----------------------------
+   Buttons
+------------------------------ */
+
+.action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.primary-button,
+.secondary-button,
+.clear-button {
+  border: none;
+  border-radius: 7px;
+  padding: 10px 16px;
+  font-weight: 600;
+}
+
+.primary-button {
+  background: #2563eb;
+  color: white;
+}
+
+.primary-button:hover {
+  background: #1d4ed8;
+}
+
+.secondary-button {
+  background: #e5e7eb;
+  color: #111827;
+}
+
+.secondary-button:hover {
+  background: #d1d5db;
+}
+
+.clear-button {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.clear-button:hover {
+  background: #fecaca;
+}
+
+/* -----------------------------
+   Read & Translate
+------------------------------ */
+
+.read-translate-container {
+  margin-top: 22px;
+  display: flex;
+  justify-content: center;
+}
+
+.read-translate-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  min-width: 240px;
+
+  padding: 14px 24px;
+
+  border: none;
+  border-radius: 8px;
+
+  background: #2563eb;
+  color: white;
+
+  font-size: 17px;
+  font-weight: 700;
+
+  box-shadow:
+    0 3px 8px rgba(0, 0, 0, 0.18);
+}
+
+.read-translate-button:hover {
+  background: #1d4ed8;
+}
+
+.read-translate-button:disabled {
+  background: #93c5fd;
+}
+
+/* -----------------------------
+   Image Preview
+------------------------------ */
+
+.image-preview {
+  margin-top: 20px;
+}
+
+.image-preview h3 {
+  margin-bottom: 10px;
+}
+
+.image-preview img {
+  display: block;
+
+  width: auto;
+
+  /*
+   * Prevent huge images.
+   */
+  max-width: 100%;
+  max-height: 380px;
+
+  object-fit: contain;
+
+  margin: 0 auto;
+
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+
+  background: #f8fafc;
+}
+
+/* -----------------------------
+   Camera
+------------------------------ */
+
+.camera-container {
+  margin-top: 20px;
+}
+
+.camera-video {
+  display: block;
+
+  width: 100%;
+  max-width: 700px;
+  max-height: 500px;
+
+  margin: 0 auto;
+
+  object-fit: contain;
+
+  background: #111827;
+
+  border-radius: 8px;
+}
+
+.camera-actions {
+  display: flex;
+  gap: 10px;
+
+  margin-top: 12px;
+}
+
+/* -----------------------------
+   Status
+------------------------------ */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  padding: 12px 16px;
+
+  margin-bottom: 20px;
+
+  background: #eff6ff;
+
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+
+  color: #1e40af;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+
+  border: 2px solid #93c5fd;
+  border-top-color: #2563eb;
+
+  border-radius: 50%;
+
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* -----------------------------
+   Results
+------------------------------ */
+
+.results {
+  display: grid;
+
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+
+  gap: 20px;
+}
+
+.results .card {
+  margin-bottom: 0;
+}
+
+textarea {
+  width: 100%;
+
+  resize: vertical;
+
+  min-height: 150px;
+
+  padding: 12px;
+
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+
+  background: #f8fafc;
+
+  line-height: 1.6;
+}
+
+/* -----------------------------
+   Result Heading
+------------------------------ */
+
+.result-heading {
+  display: flex;
+
+  align-items: center;
+
+  justify-content: space-between;
+
+  gap: 12px;
+
+  margin-bottom: 12px;
+}
+
+.result-heading h2 {
+  margin: 0;
+}
+
+/* -----------------------------
+   Sentence TTS
+------------------------------ */
+
+.tts-button {
+  display: inline-flex;
+
+  align-items: center;
+
+  gap: 5px;
+
+  border: 1px solid #cbd5e1;
+
+  background: white;
+
+  padding: 7px 12px;
+
+  border-radius: 6px;
+
+  cursor: pointer;
+
+  font-size: 14px;
+}
+
+.tts-button:hover {
+  background: #f3f4f6;
+}
+
+/* -----------------------------
+   Result Info
+------------------------------ */
+
+.result-info {
+  margin-top: 8px;
+
+  font-size: 13px;
+
+  color: #64748b;
+}
+
+/* -----------------------------
+   Word Translation
+------------------------------ */
+
+.word-translation {
+  margin-top: 20px;
+
+  padding-top: 16px;
+
+  border-top: 1px solid #e5e7eb;
+}
+
+.word-translation h3 {
+  margin: 0 0 12px;
+
+  font-size: 18px;
+}
+
+.word-line {
+  display: flex;
+
+  flex-wrap: wrap;
+
+  gap: 9px;
+
+  line-height: 1.8;
+}
+
+.word-pair {
+  display: inline-flex;
+
+  align-items: center;
+
+  gap: 5px;
+
+  padding: 6px 9px;
+
+  border-radius: 7px;
+
+  background: #f5f7fa;
+
+  border: 1px solid #e5e7eb;
+
+  font-size: 16px;
+}
+
+.source-word {
+  font-weight: 600;
+}
+
+.arrow {
+  color: #64748b;
+}
+
+.target-word {
+  color: #374151;
+}
+
+.word-tts-button {
+  border: none;
+
+  background: transparent;
+
+  padding: 2px;
+
+  font-size: 14px;
+
+  line-height: 1;
+
+  cursor: pointer;
+}
+
+.word-tts-button:hover {
+  transform: scale(1.15);
+}
+
+/* -----------------------------
+   Translate Again
+------------------------------ */
+
+.translate-form {
+  margin-top: 18px;
+}
+
+/* -----------------------------
+   Mobile
+------------------------------ */
+
+@media (max-width: 800px) {
+  .results {
+    grid-template-columns: 1fr;
+  }
+
+  .language-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .swap-button {
+    justify-self: center;
+  }
+}
+
+@media (max-width: 600px) {
+  .app-header h1 {
+    font-size: 23px;
+  }
+
+  .container {
+    width: 94%;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  .image-preview img {
+    max-height: 300px;
+  }
+
+  .word-pair {
+    font-size: 14px;
+  }
+}
+```
