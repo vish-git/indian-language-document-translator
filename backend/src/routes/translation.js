@@ -3,10 +3,11 @@ import express from "express";
 const router = express.Router();
 
 /*
- * Supported language mappings.
- *
- * Tesseract language code -> translation language code
+ * ============================================
+ * Supported languages
+ * ============================================
  */
+
 const LANGUAGE_CODES = {
   eng: "en",
   hin: "hi",
@@ -23,33 +24,70 @@ const SUPPORTED_LANGUAGES = new Set([
   "kn",
 ]);
 
+/*
+ * ============================================
+ * Translation provider
+ * ============================================
+ */
+
 const MYMEMORY_API =
   "https://api.mymemory.translated.net/get";
 
 /*
- * Maximum size sent to MyMemory for sentence translation.
+ * Keep normal translation requests reasonably
+ * small because public translation services
+ * can reject very large requests.
  */
 const MAX_CHUNK_LENGTH = 400;
 
 /*
- * Maximum number of unique words for word-by-word translation.
+ * Word translation settings.
  *
- * This prevents a large OCR document from generating hundreds
- * or thousands of external API calls.
+ * IMPORTANT:
+ *
+ * Old implementation:
+ *
+ *   word 1 -> API
+ *   word 2 -> API
+ *   word 3 -> API
+ *   ...
+ *   word 100 -> API
+ *
+ * New implementation:
+ *
+ *   40 words -> ONE API request
+ *   40 words -> ONE API request
+ *   20 words -> ONE API request
+ *
+ * This dramatically reduces API traffic.
  */
+
 const MAX_WORD_TRANSLATIONS = 100;
 
+const WORD_BATCH_SIZE = 35;
+
 /*
- * Normalize incoming language.
+ * Delay between word batches.
  *
- * Examples:
- *
- * hin -> hi
- * tam -> ta
- * tel -> te
- * kan -> kn
- * eng -> en
+ * This gives the public translation provider
+ * some breathing room.
  */
+const WORD_BATCH_DELAY_MS = 500;
+
+/*
+ * Retry settings for HTTP 429.
+ */
+
+const MAX_RETRIES = 3;
+
+const INITIAL_RETRY_DELAY_MS = 1500;
+
+/*
+ * ============================================
+ * Utility functions
+ * ============================================
+ */
+
 function normalizeLanguage(language) {
   if (!language) {
     return null;
@@ -71,17 +109,58 @@ function normalizeLanguage(language) {
 }
 
 /*
- * Split long OCR text into smaller chunks.
- *
- * We try to split on:
- * - paragraphs
- * - sentences
- * - spaces
- *
- * This prevents very long text from being sent
- * in a single translation request.
+ * Sleep helper.
  */
-function splitText(text, maxLength = MAX_CHUNK_LENGTH) {
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/*
+ * ============================================
+ * Text splitting
+ * ============================================
+ */
+
+function splitByWords(text, maxLength) {
+  const words = text.split(/\s+/);
+
+  const chunks = [];
+
+  let current = "";
+
+  for (const word of words) {
+    if (!current) {
+      current = word;
+      continue;
+    }
+
+    if (
+      current.length +
+        word.length +
+        1 <=
+      maxLength
+    ) {
+      current += ` ${word}`;
+    } else {
+      chunks.push(current);
+
+      current = word;
+    }
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks;
+}
+
+function splitText(
+  text,
+  maxLength = MAX_CHUNK_LENGTH
+) {
   const normalizedText = text
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -108,26 +187,46 @@ function splitText(text, maxLength = MAX_CHUNK_LENGTH) {
       continue;
     }
 
-    const sentences = paragraph.match(
-      /[^.!?।]+[.!?।]?/gu
-    );
+    /*
+     * Supports:
+     *
+     * .
+     * !
+     * ?
+     * ।
+     *
+     * This is useful for Indian-language text.
+     */
+    const sentences =
+      paragraph.match(
+        /[^.!?।]+[.!?।]?/gu
+      );
 
     if (!sentences) {
-      chunks.push(...splitByWords(paragraph, maxLength));
+      chunks.push(
+        ...splitByWords(
+          paragraph,
+          maxLength
+        )
+      );
+
       continue;
     }
 
     let current = "";
 
     for (const sentence of sentences) {
-      const trimmedSentence = sentence.trim();
+      const trimmedSentence =
+        sentence.trim();
 
       if (!trimmedSentence) {
         continue;
       }
 
       if (
-        current.length + trimmedSentence.length + 1 <=
+        current.length +
+          trimmedSentence.length +
+          1 <=
         maxLength
       ) {
         current = current
@@ -138,12 +237,19 @@ function splitText(text, maxLength = MAX_CHUNK_LENGTH) {
           chunks.push(current);
         }
 
-        if (trimmedSentence.length <= maxLength) {
+        if (
+          trimmedSentence.length <=
+          maxLength
+        ) {
           current = trimmedSentence;
         } else {
           chunks.push(
-            ...splitByWords(trimmedSentence, maxLength)
+            ...splitByWords(
+              trimmedSentence,
+              maxLength
+            )
           );
+
           current = "";
         }
       }
@@ -158,130 +264,257 @@ function splitText(text, maxLength = MAX_CHUNK_LENGTH) {
 }
 
 /*
- * Split a very long sentence by words.
+ * ============================================
+ * MyMemory request
+ * ============================================
+ *
+ * This function handles:
+ *
+ * - normal HTTP errors
+ * - HTTP 429
+ * - retries
  */
-function splitByWords(text, maxLength) {
-  const words = text.split(/\s+/);
 
-  const chunks = [];
-  let current = "";
-
-  for (const word of words) {
-    if (!current) {
-      current = word;
-      continue;
-    }
-
-    if (
-      current.length + word.length + 1 <=
-      maxLength
-    ) {
-      current += ` ${word}`;
-    } else {
-      chunks.push(current);
-      current = word;
-    }
-  }
-
-  if (current) {
-    chunks.push(current);
-  }
-
-  return chunks;
-}
-
-/*
- * Translate a complete sentence/chunk.
- */
-async function translateChunk(
+async function requestMyMemory(
   text,
   source,
-  target
+  target,
+  options = {}
 ) {
-  const url = new URL(MYMEMORY_API);
+  const {
+    retries = MAX_RETRIES,
+    retryDelay = INITIAL_RETRY_DELAY_MS,
+  } = options;
 
-  url.searchParams.set("q", text);
+  const url = new URL(
+    MYMEMORY_API
+  );
+
+  url.searchParams.set(
+    "q",
+    text
+  );
+
   url.searchParams.set(
     "langpair",
     `${source}|${target}`
   );
 
-  const response = await fetch(url);
+  /*
+   * MyMemory supports this parameter for
+   * identifying the requester.
+   */
+  url.searchParams.set(
+    "de",
+    "local-translator-app@example.com"
+  );
 
-  if (!response.ok) {
-    throw new Error(
-      `Translation provider returned HTTP ${response.status}`
-    );
-  }
+  let lastError = null;
 
-  const data = await response.json();
-
-  if (
-    data.responseStatus &&
-    Number(data.responseStatus) !== 200
+  for (
+    let attempt = 0;
+    attempt <= retries;
+    attempt++
   ) {
-    throw new Error(
-      data.responseDetails ||
-        "Translation provider rejected the request."
-    );
+    try {
+      const response =
+        await fetch(url, {
+          headers: {
+            Accept:
+              "application/json",
+            "User-Agent":
+              "MultilingualDocumentTranslator/1.0",
+          },
+        });
+
+      /*
+       * ========================================
+       * HTTP 429
+       * ========================================
+       */
+
+      if (
+        response.status === 429
+      ) {
+        const retryAfterHeader =
+          response.headers.get(
+            "retry-after"
+          );
+
+        let waitTime =
+          retryDelay *
+          Math.pow(2, attempt);
+
+        /*
+         * If provider supplies Retry-After,
+         * prefer that value.
+         */
+        if (retryAfterHeader) {
+          const retryAfterSeconds =
+            Number(
+              retryAfterHeader
+            );
+
+          if (
+            Number.isFinite(
+              retryAfterSeconds
+            )
+          ) {
+            waitTime =
+              retryAfterSeconds *
+              1000;
+          }
+        }
+
+        if (attempt < retries) {
+          console.warn(
+            `MyMemory returned HTTP 429. ` +
+              `Retrying in ${Math.round(
+                waitTime / 1000
+              )} seconds...`
+          );
+
+          await sleep(waitTime);
+
+          continue;
+        }
+
+        throw new Error(
+          "Translation service is temporarily rate-limiting requests (HTTP 429). Please wait a moment and try again."
+        );
+      }
+
+      /*
+       * Other HTTP errors.
+       */
+
+      if (!response.ok) {
+        throw new Error(
+          `Translation provider returned HTTP ${response.status}`
+        );
+      }
+
+      const data =
+        await response.json();
+
+      /*
+       * MyMemory may return a responseStatus
+       * even when the HTTP status is 200.
+       */
+
+      if (
+        data.responseStatus &&
+        Number(
+          data.responseStatus
+        ) !== 200
+      ) {
+        throw new Error(
+          data.responseDetails ||
+            "Translation provider rejected the request."
+        );
+      }
+
+      const translatedText =
+        data?.responseData
+          ?.translatedText;
+
+      if (
+        !translatedText
+      ) {
+        throw new Error(
+          "Translation provider returned no translation."
+        );
+      }
+
+      return translatedText;
+    } catch (error) {
+      lastError = error;
+
+      /*
+       * Network errors can be retried too.
+       *
+       * Do not retry arbitrary application
+       * errors indefinitely.
+       */
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      const isRateLimit =
+        message.includes(
+          "HTTP 429"
+        ) ||
+        message.includes(
+          "rate-limiting"
+        );
+
+      if (
+        isRateLimit &&
+        attempt < retries
+      ) {
+        const waitTime =
+          retryDelay *
+          Math.pow(2, attempt);
+
+        console.warn(
+          `Retrying translation request in ${Math.round(
+            waitTime / 1000
+          )} seconds...`
+        );
+
+        await sleep(waitTime);
+
+        continue;
+      }
+
+      throw error;
+    }
   }
 
-  const translatedText =
-    data?.responseData?.translatedText;
-
-  if (!translatedText) {
-    throw new Error(
-      "Translation provider returned no translation."
-    );
-  }
-
-  return translatedText;
+  throw (
+    lastError ||
+    new Error(
+      "Translation failed."
+    )
+  );
 }
 
 /*
- * Translate complete text using chunks.
+ * ============================================
+ * Sentence/chunk translation
+ * ============================================
  */
-async function translateFullText(
+
+async function translateChunk(
   text,
   source,
   target
 ) {
-  const chunks = splitText(text);
-
-  if (chunks.length === 0) {
-    return "";
-  }
-
-  const translatedChunks = [];
-
-  for (const chunk of chunks) {
-    const translated = await translateChunk(
-      chunk,
-      source,
-      target
-    );
-
-    translatedChunks.push(translated);
-  }
-
-  return translatedChunks.join("\n");
+  return requestMyMemory(
+    text,
+    source,
+    target
+  );
 }
 
 /*
- * Tokenize OCR text into words and punctuation.
+ * ============================================
+ * Tokenization
+ * ============================================
  *
- * Unicode-aware regex is important here because
- * Hindi/Tamil/Telugu/Kannada characters are not
- * ASCII characters.
+ * Supports Unicode letters, marks and numbers.
  *
- * Example:
+ * This works for:
  *
- * "यह भारत है।"
- *
- * becomes:
- *
- * ["यह", "भारत", "है", "।"]
+ * English
+ * Hindi
+ * Tamil
+ * Telugu
+ * Kannada
  */
+
 function tokenizeText(text) {
   return (
     text.match(
@@ -290,284 +523,621 @@ function tokenizeText(text) {
   );
 }
 
-/*
- * Determine whether a token is a word/number
- * rather than punctuation.
- */
 function isWordToken(token) {
-  return /[\p{L}\p{M}\p{N}]/u.test(token);
-}
-
-/*
- * Translate one word.
- *
- * We intentionally send one word at a time here
- * because the UI wants word-by-word meaning.
- */
-async function translateWord(
-  word,
-  source,
-  target
-) {
-  return translateChunk(
-    word,
-    source,
-    target
+  return /[\p{L}\p{M}\p{N}]/u.test(
+    token
   );
 }
 
 /*
- * Word-by-word translation.
+ * ============================================
+ * Word batching
+ * ============================================
  *
- * Returns:
+ * Example:
  *
  * [
- *   {
- *     source: "यह",
- *     target: "this"
- *   },
- *   {
- *     source: "भारत",
- *     target: "India"
- *   }
+ *   "नमस्ते",
+ *   "आप",
+ *   "कैसे",
+ *   "हैं"
  * ]
  *
- * Repeated words are cached within this request.
+ * becomes:
+ *
+ * नमस्ते
+ * आप
+ * कैसे
+ * हैं
+ *
+ * and is sent as ONE translation request.
+ *
+ * Newline is used as the separator so that
+ * the response can be mapped back to the
+ * original words.
  */
+
+function createWordBatches(
+  words,
+  batchSize = WORD_BATCH_SIZE
+) {
+  const batches = [];
+
+  for (
+    let i = 0;
+    i < words.length;
+    i += batchSize
+  ) {
+    batches.push(
+      words.slice(
+        i,
+        i + batchSize
+      )
+    );
+  }
+
+  return batches;
+}
+
+/*
+ * Normalize a translated batch.
+ *
+ * Translation providers don't always preserve
+ * line breaks perfectly, so we support several
+ * formats.
+ */
+
+function parseTranslatedWordBatch(
+  translatedText,
+  expectedCount
+) {
+  if (!translatedText) {
+    return [];
+  }
+
+  /*
+   * First try newline-based mapping.
+   */
+
+  let lines =
+    translatedText
+      .split(/\r?\n/)
+      .map((line) =>
+        line.trim()
+      )
+      .filter(Boolean);
+
+  /*
+   * Sometimes the provider may return
+   * semicolon-separated output.
+   */
+
+  if (
+    lines.length === 1 &&
+    expectedCount > 1 &&
+    lines[0].includes(";")
+  ) {
+    lines = lines[0]
+      .split(";")
+      .map((item) =>
+        item.trim()
+      )
+      .filter(Boolean);
+  }
+
+  /*
+   * We intentionally don't try to invent
+   * mappings if the provider returns fewer
+   * translations than requested.
+   *
+   * Returning fewer entries is safer than
+   * incorrectly pairing words.
+   */
+
+  return lines;
+}
+
+/*
+ * ============================================
+ * Batch word translation
+ * ============================================
+ *
+ * IMPORTANT:
+ *
+ * This replaces the old:
+ *
+ *   translateWord(word)
+ *
+ * loop.
+ *
+ * Instead of 100 API calls, we make roughly
+ * 3 API calls for 100 words.
+ */
+
+async function translateWordBatch(
+  words,
+  source,
+  target
+) {
+  if (!words.length) {
+    return [];
+  }
+
+  /*
+   * Put one word per line.
+   */
+
+  const batchText =
+    words.join("\n");
+
+  try {
+    const translated =
+      await translateChunk(
+        batchText,
+        source,
+        target
+      );
+
+    const translatedWords =
+      parseTranslatedWordBatch(
+        translated,
+        words.length
+      );
+
+    /*
+     * If provider preserved all lines,
+     * map them directly.
+     */
+
+    if (
+      translatedWords.length ===
+      words.length
+    ) {
+      return words.map(
+        (word, index) => ({
+          source: word,
+          target:
+            translatedWords[
+              index
+            ] || word,
+        })
+      );
+    }
+
+    /*
+     * If response couldn't be reliably
+     * mapped, don't create incorrect
+     * source/target relationships.
+     *
+     * Fall back to original words.
+     */
+
+    console.warn(
+      `Could not reliably map word batch. Expected ${words.length} translations but received ${translatedWords.length}.`
+    );
+
+    return words.map(
+      (word) => ({
+        source: word,
+        target: word,
+      })
+    );
+  } catch (error) {
+    console.error(
+      "Word batch translation failed:",
+      error.message
+    );
+
+    /*
+     * Word-by-word translation is an
+     * enhancement. It must never make the
+     * main sentence translation fail.
+     */
+
+    return words.map(
+      (word) => ({
+        source: word,
+        target: word,
+      })
+    );
+  }
+}
+
+/*
+ * ============================================
+ * Translate words
+ * ============================================
+ */
+
 async function translateWords(
   text,
   source,
   target
 ) {
-  const tokens = tokenizeText(text);
+  const tokens =
+    tokenizeText(text);
 
-  const words = tokens.filter(isWordToken);
+  const words =
+    tokens.filter(
+      isWordToken
+    );
 
-  if (words.length === 0) {
+  if (!words.length) {
     return [];
   }
 
   /*
-   * Remove duplicates while preserving order.
+   * Remove duplicate words while preserving
+   * the original order.
    */
+
   const uniqueWords = [
     ...new Set(words),
   ];
 
   /*
-   * Protect the external translation service
-   * from very large OCR documents.
+   * Protect the backend from unexpectedly
+   * large OCR documents.
    */
+
   const wordsToTranslate =
     uniqueWords.slice(
       0,
       MAX_WORD_TRANSLATIONS
     );
 
-  const cache = new Map();
+  const batches =
+    createWordBatches(
+      wordsToTranslate,
+      WORD_BATCH_SIZE
+    );
 
-  /*
-   * Translate sequentially.
-   *
-   * We intentionally do not use Promise.all()
-   * because that could generate a large number
-   * of simultaneous external requests.
-   */
-  for (const word of wordsToTranslate) {
-    try {
-      const translated = await translateWord(
-        word,
+  console.log(
+    `Word translation: ${wordsToTranslate.length} unique words in ${batches.length} API batch(es).`
+  );
+
+  const cache =
+    new Map();
+
+  for (
+    let i = 0;
+    i < batches.length;
+    i++
+  ) {
+    const batch =
+      batches[i];
+
+    console.log(
+      `Translating word batch ${
+        i + 1
+      }/${batches.length} (${batch.length} words)`
+    );
+
+    const translatedBatch =
+      await translateWordBatch(
+        batch,
         source,
         target
       );
 
-      cache.set(word, translated);
-    } catch (error) {
-      console.error(
-        `Failed to translate word "${word}":`,
-        error.message
+    for (
+      const item of translatedBatch
+    ) {
+      cache.set(
+        item.source,
+        item.target
       );
+    }
 
-      /*
-       * Keep the original word if individual
-       * word translation fails.
-       */
-      cache.set(word, word);
+    /*
+     * Don't immediately hammer the
+     * public provider with another request.
+     */
+
+    if (
+      i <
+      batches.length - 1
+    ) {
+      await sleep(
+        WORD_BATCH_DELAY_MS
+      );
     }
   }
 
   /*
-   * Build final word-by-word result.
+   * Reconstruct the original word order.
    */
-  return words.map((word) => ({
-    source: word,
-    target: cache.get(word) || word,
-  }));
+
+  return words.map(
+    (word) => ({
+      source: word,
+      target:
+        cache.get(word) ||
+        word,
+    })
+  );
 }
 
 /*
+ * ============================================
  * POST /api/translate
- *
- * Request:
- *
- * {
- *   "text": "यह भारत है",
- *   "source": "hi",
- *   "target": "en"
- * }
- *
- * Response:
- *
- * {
- *   "translation": "This is India",
- *   "words": [
- *      {
- *        "source": "यह",
- *        "target": "this"
- *      }
- *   ]
- * }
+ * ============================================
  */
-router.post("/", async (req, res) => {
-  try {
-    const {
-      text,
-      source,
-      target,
-    } = req.body;
 
-    /*
-     * Validate text
-     */
-    if (
-      typeof text !== "string" ||
-      !text.trim()
-    ) {
-      return res.status(400).json({
-        error: "Text is required.",
-      });
-    }
+router.post(
+  "/",
+  async (req, res) => {
+    try {
+      const {
+        text,
+        source,
+        target,
+      } = req.body;
 
-    /*
-     * Normalize languages
-     */
-    const normalizedSource =
-      normalizeLanguage(source);
+      /*
+       * Validate text.
+       */
 
-    const normalizedTarget =
-      normalizeLanguage(target);
+      if (
+        typeof text !==
+          "string" ||
+        !text.trim()
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Text is required.",
+          });
+      }
 
-    /*
-     * Validate source language
-     */
-    if (!normalizedSource) {
-      return res.status(400).json({
-        error:
-          "Unsupported source language. Supported languages: en, hi, ta, te, kn.",
-      });
-    }
+      /*
+       * Normalize languages.
+       */
 
-    /*
-     * Validate target language
-     */
-    if (!normalizedTarget) {
-      return res.status(400).json({
-        error:
-          "Unsupported target language. Supported languages: en, hi, ta, te, kn.",
-      });
-    }
-
-    /*
-     * If source and target are identical,
-     * no external translation is necessary.
-     */
-    if (
-      normalizedSource === normalizedTarget
-    ) {
-      const tokens = tokenizeText(text);
-
-      const words = tokens
-        .filter(isWordToken)
-        .map((word) => ({
-          source: word,
-          target: word,
-        }));
-
-      return res.json({
-        translation: text.trim(),
-        words,
-        source: normalizedSource,
-        target: normalizedTarget,
-        chunks: 1,
-      });
-    }
-
-    console.log(
-      `Translation request: ${normalizedSource} -> ${normalizedTarget}`
-    );
-
-    /*
-     * 1. Natural translation
-     */
-    const chunks = splitText(text);
-
-    const translatedChunks = [];
-
-    for (const chunk of chunks) {
-      console.log(
-        `Translating chunk (${chunk.length} characters)`
-      );
-
-      const translated =
-        await translateChunk(
-          chunk,
-          normalizedSource,
-          normalizedTarget
+      const normalizedSource =
+        normalizeLanguage(
+          source
         );
 
-      translatedChunks.push(translated);
-    }
+      const normalizedTarget =
+        normalizeLanguage(
+          target
+        );
 
-    const translation =
-      translatedChunks.join("\n");
+      if (
+        !normalizedSource
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Unsupported source language. Supported languages: en, hi, ta, te, kn.",
+          });
+      }
 
-    /*
-     * 2. Word-by-word translation
-     */
-    console.log(
-      "Generating word-by-word translation..."
-    );
+      if (
+        !normalizedTarget
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Unsupported target language. Supported languages: en, hi, ta, te, kn.",
+          });
+      }
 
-    const words =
-      await translateWords(
-        text,
-        normalizedSource,
-        normalizedTarget
+      console.log(
+        `Translation request: ${normalizedSource} -> ${normalizedTarget}`
       );
 
-    /*
-     * Return both natural and word-by-word
-     * translations.
-     */
-    return res.json({
-      translation,
-      words,
-      source: normalizedSource,
-      target: normalizedTarget,
-      chunks: chunks.length,
-    });
-  } catch (error) {
-    console.error(
-      "Translation error:",
-      error
-    );
+      /*
+       * ========================================
+       * Same language
+       * ========================================
+       */
 
-    return res.status(500).json({
-      error:
-        error?.message ||
-        "Translation failed.",
-    });
+      if (
+        normalizedSource ===
+        normalizedTarget
+      ) {
+        const tokens =
+          tokenizeText(text);
+
+        const words =
+          tokens
+            .filter(
+              isWordToken
+            )
+            .map(
+              (word) => ({
+                source: word,
+                target: word,
+              })
+            );
+
+        return res.json({
+          translation:
+            text.trim(),
+
+          words,
+
+          source:
+            normalizedSource,
+
+          target:
+            normalizedTarget,
+
+          chunks: 1,
+        });
+      }
+
+      /*
+       * ========================================
+       * Sentence translation
+       * ========================================
+       */
+
+      const chunks =
+        splitText(text);
+
+      if (!chunks.length) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "No translatable text was found.",
+          });
+      }
+
+      const translatedChunks =
+        [];
+
+      for (
+        let i = 0;
+        i < chunks.length;
+        i++
+      ) {
+        const chunk =
+          chunks[i];
+
+        console.log(
+          `Translating chunk ${
+            i + 1
+          }/${chunks.length} (${chunk.length} characters)`
+        );
+
+        const translated =
+          await translateChunk(
+            chunk,
+            normalizedSource,
+            normalizedTarget
+          );
+
+        translatedChunks.push(
+          translated
+        );
+
+        /*
+         * Small delay between sentence
+         * chunks.
+         *
+         * This helps avoid immediately
+         * triggering another 429.
+         */
+
+        if (
+          i <
+          chunks.length - 1
+        ) {
+          await sleep(300);
+        }
+      }
+
+      const translation =
+        translatedChunks.join(
+          "\n"
+        );
+
+      /*
+       * ========================================
+       * Word-by-word translation
+       * ========================================
+       *
+       * IMPORTANT:
+       *
+       * Failure here DOES NOT fail the
+       * complete translation.
+       */
+
+      console.log(
+        "Generating batched word-by-word translation..."
+      );
+
+      let words = [];
+
+      try {
+        words =
+          await translateWords(
+            text,
+            normalizedSource,
+            normalizedTarget
+          );
+      } catch (error) {
+        console.error(
+          "Word-by-word translation failed:",
+          error.message
+        );
+
+        /*
+         * Keep the main translation usable.
+         */
+        words = [];
+      }
+
+      /*
+       * ========================================
+       * Response
+       * ========================================
+       *
+       * This shape is intentionally kept
+       * compatible with your existing
+       * App.tsx.
+       */
+
+      return res.json({
+        translation,
+
+        words,
+
+        source:
+          normalizedSource,
+
+        target:
+          normalizedTarget,
+
+        chunks:
+          chunks.length,
+      });
+    } catch (error) {
+      console.error(
+        "Translation error:",
+        error
+      );
+
+      /*
+       * Explicit 429 handling.
+       */
+
+      if (
+        error?.message?.includes(
+          "HTTP 429"
+        ) ||
+        error?.message?.includes(
+          "rate-limiting"
+        )
+      ) {
+        return res
+          .status(429)
+          .json({
+            error:
+              "The translation service is temporarily rate-limiting requests. Please wait 15–30 seconds and try again.",
+          });
+      }
+
+      /*
+       * Other errors.
+       */
+
+      return res
+        .status(500)
+        .json({
+          error:
+            error?.message ||
+            "Translation failed.",
+        });
+    }
   }
-});
+);
 
 export default router;
